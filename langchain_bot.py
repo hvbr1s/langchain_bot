@@ -1,6 +1,5 @@
 import os
 import json
-import ast
 from langchain.vectorstores import Pinecone
 from langchain.embeddings.openai import OpenAIEmbeddings
 from dotenv import main
@@ -17,16 +16,15 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from nostril import nonsense
-from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.chains import ConversationalRetrievalChain
 from langchain.vectorstores import Pinecone
-from langchain.memory import ConversationBufferMemory
+from langchain.memory import ConversationBufferWindowMemory
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
 from langchain.embeddings.huggingface import HuggingFaceEmbeddings
 
 import torch
-from torch import cuda, bfloat16
+from torch import cuda
 torch.cuda.empty_cache()
 device = f'cuda:{cuda.current_device()}' if cuda.is_available() else 'cpu'
 
@@ -77,9 +75,6 @@ Begin!
 ######################################################
 
 
-# Initialize OpenAI embeddings 
-# embeddings = OpenAIEmbeddings()
-
 # Initialize HuggingFace embedding 
 embed_model_id = 'sentence-transformers/all-MiniLM-L6-v2'
 embed_model = HuggingFaceEmbeddings(
@@ -88,10 +83,6 @@ embed_model = HuggingFaceEmbeddings(
     encode_kwargs={'device': device, 'batch_size': 32}
 )
 
-
-#Initialize 1536 dimensions vectorstore
-# vectorstore = Pinecone.from_existing_index(index_name, embeddings)
-
 #Initialize 384 dimensions vectorstore
 text_field = 'text' 
 vectorstore = Pinecone(
@@ -99,7 +90,7 @@ vectorstore = Pinecone(
 )
 
 #Initialize agent memory
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+memory=ConversationBufferWindowMemory(memory_key="chat_history", return_messages=True, k=2)
 
 ####################
 
@@ -134,8 +125,6 @@ async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExc
 
 # Initialize user state
 user_states = {}
-chat_history = []
-
 # Define FastAPI endpoints
 
 @app.get("/", response_class=HTMLResponse)
@@ -150,41 +139,43 @@ async def health_check():
 @app.post('/gpt')
 @limiter.limit("50/hour")
 def react_description(query: Query, request: Request):
-    
-    global chat_history
     user_id = query.user_id
     query = query.user_input.strip()
-    print(query) 
+    print(query)
+
+    # Initialize user state with state and chat history
     if user_id not in user_states:
-        user_states[user_id] = None
+        user_states[user_id] = {
+            'state': None,
+            'chat_history': []
+        }
+    
+    current_chat_history = user_states[user_id]['chat_history']
+
     if not query or nonsense(query):
         print('checkpoint')
         print('Nonsense detected!')
         return {'output': "I'm sorry, I didn't quite understand your question. Could you please provide more details or rephrase it? Remember, I'm here to help with any Ledger-related inquiries."}
-    
     else:
-
         try:
-
             qa = ConversationalRetrievalChain.from_llm(
                 ChatOpenAI(temperature=0, model="gpt-4"),
                 #ChatOpenAI(temperature=0, model="gpt-3.5-turbo"),
-                vectorstore.as_retriever(),
+                retriever=vectorstore.as_retriever(),
                 return_source_documents=True,
-                verbose=True
+                verbose=True, 
             )
-            result = qa({"question": query, "chat_history": chat_history})
-            print('checkpoint')
+            result = qa({"question": query, "chat_history": current_chat_history})
+
+            print(current_chat_history)
             chunk = (result['source_documents'][0])
             print(chunk)
             article_source = chunk.metadata['source']
             print(article_source)
 
-            response = result["answer"] #+ "\n\n You can find more details at: \n" + article_source
+            response = result["answer"]
+            user_states[user_id]['chat_history'] = [(query, result["answer"])]
 
-            # Save the response to a thread
-            user_states[user_id] = response
-            print(user_states)
             print(response)
             return {'output': response}
         
@@ -194,6 +185,7 @@ def react_description(query: Query, request: Request):
 
 ############### START COMMAND ##########
 
-#   uvicorn chat_bot:app --reload --port 8008
+#   uvicorn chat_bot_hugging_face:app --reload --port 8008
 #   uvicorn chat_bot:app --port 80 --host 0.0.0.0
 #   to modify promt >> /home/dan/hc_bot/bots/lib/python3.10/site-packages/langchain/chains/question_answering/stuff_prompt.py
+#   change k at /home/dan/hc_bot/bots/lib/python3.10/site-packages/langchain/vectorstores/pinecone.py
