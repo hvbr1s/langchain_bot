@@ -4,7 +4,7 @@ from langchain.vectorstores import Pinecone
 from langchain.embeddings.openai import OpenAIEmbeddings
 from dotenv import main
 import pinecone
-import openai
+from helicone.openai_async import openai
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -106,8 +106,6 @@ def get_user_id(request: Request):
 
 # Define FastAPI app
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="./static/BBALP00A.TTF")
 
 # Define limiter
 limiter = Limiter(key_func=get_user_id)
@@ -122,12 +120,14 @@ async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExc
         content={"detail": "Too many requests, please try again in an hour."},
     )
 
+# Initialize user_states
 user_states = {}
+MAX_HISTORY_LENGTH = 10 
 
 # Define FastAPI endpoints
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+@app.get("/")
+async def root():
+    return {"welcome": "You've reached the home route!"}
 
 
 @app.get("/_health")
@@ -138,21 +138,25 @@ async def health_check():
 @limiter.limit("50/hour")
 def react_description(query: Query, request: Request):
     
-    
     user_id = query.user_id
     user_input = query.user_input.strip()
     if user_id not in user_states:
-        user_states[user_id] = None
+        user_states[user_id] = {
+            'messages': [SystemMessage(content=primer)]  # Initialize the messages list with the primer
+        }
+    
+    messages = user_states[user_id]['messages']
+
+    # Limit the memory for chat
+    while len(messages) >= MAX_HISTORY_LENGTH:
+        messages.pop(0)  # remove the oldest message
+        messages.pop(0)  # remove the corresponding response
+
     if not query.user_input or nonsense(query.user_input):
         print('Nonsense detected!')
         return {'output': "I'm sorry, I didn't quite understand your question. Could you please provide more details or rephrase it? Remember, I'm here to help with any Ledger-related inquiries."}
     else:
         try:
-            
-                        
-            messages = [
-            SystemMessage(content=primer)
-            ]
 
             def augment_prompt(input_query: str):
                 # get top 3 results from knowledge base
@@ -179,14 +183,11 @@ def react_description(query: Query, request: Request):
             # add to messages
             messages.append(prompt)
             response = chat(messages)
-            # add latest AI response to messages
             messages.append(response)
-            print (messages)
-            
-            res = chat(messages + [prompt])
-            chatty = res.content
-            print(res.content)
-            return {'output': chatty}
+            res = response.content
+            print(res)
+            print (user_states)
+            return {'output': res}
             
         except ValueError as e:
             print(e)
@@ -195,4 +196,4 @@ def react_description(query: Query, request: Request):
 
 ############### START COMMAND ##########
 
-#   uvicorn chatbot_langchain:app --reload --port 8008
+#   uvicorn chatbot_langchain:app --reload --port 8800
